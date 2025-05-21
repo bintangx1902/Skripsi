@@ -45,22 +45,23 @@ with tf.device('/GPU:0'):
     audio['data'] = audio.filepath.apply(preprocess_audio)
     audio = audio.sample(frac=1).reset_index(drop=True)
 #%%
-x_audio = np.stack(audio['data'].values)
-y_audio = audio['label_encoded'].values
-print(x_audio.shape)
-del audio
+_, temp = train_test_split(audio, test_size=0.4, random_state=42)
+test_df, val_df = train_test_split(temp, test_size=0.5, random_state=42)
 #%%
-x_audio_train, x_temp, y_audio_train, y_temp = train_test_split(
-    x_audio, y_audio, test_size=0.3, random_state=100,
-)
+x_audio_train = np.stack(audio['data'].values)
+y_audio_train = np.array(audio.label_encoded.values)
 
-x_audio_val, x_audio_test, y_audio_val, y_audio_test = train_test_split(
-    x_temp, y_temp, test_size=0.5, random_state=222,
-)
+x_audio_val = np.stack(val_df['data'].values)
+y_audio_val = np.array(val_df.label_encoded.values)
 
-del x_audio, y_audio
+x_audio_test = np.stack(test_df['data'].values)
+y_audio_test = np.array(test_df.label_encoded.values)
+
+del _, temp, test_df, val_df, audio
+#%%
 print(x_audio_train.shape)
-print(x_audio_train.shape[0] == len(y_audio_train))
+print(x_audio_val.shape)
+print(x_audio_test.shape)
 #%% md
 # # Modeling
 # ## Model Image
@@ -74,18 +75,20 @@ base_model = tf.keras.applications.VGG19(
 for layer in base_model.layers:
     layer.trainable = False
 #%%
-model = tf.keras.Sequential([
-    base_model,
-    tf.keras.layers.GlobalAveragePooling2D(),
-    tf.keras.layers.Dense(512, activation='relu'),
-    tf.keras.layers.Dense(8, activation='softmax'),
-])
-
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(),
-    loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-    metrics=['accuracy'],
-)
+with tf.device('/CPU:0'):
+    model = tf.keras.Sequential([
+        base_model,
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dropout(.5),
+        tf.keras.layers.Dense(512, activation='relu'),
+        tf.keras.layers.Dense(8, activation='softmax'),
+    ])
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+        metrics=['accuracy'],
+    )
 #%%
 plot_model(model, show_shapes=True)
 #%%
@@ -112,17 +115,18 @@ lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss',
                                                     mode='min'
                                                     )
 #%%
-history = model.fit(
-    x_audio_train,
-    y_audio_train,
-    validation_data=(x_audio_val, y_audio_val),
-    callbacks=[lr_scheduler],
-    epochs=50,
-    verbose=2,
-    batch_size=64,
-    steps_per_epoch=len(x_audio_train) // 64,
-    validation_steps=len(x_audio_val) // 64,
-)
+with tf.device('/GPU:0'):
+    history = model.fit(
+        x_audio_train,
+        y_audio_train,
+        validation_data=(x_audio_val, y_audio_val),
+        callbacks=[lr_scheduler],
+        epochs=100,
+        verbose=2,
+        batch_size=BATCH_SIZE,
+        steps_per_epoch=len(x_audio_train) // BATCH_SIZE,
+        validation_steps=len(x_audio_val) // BATCH_SIZE,
+    )
 
 #%% md
 # # Evaluate Model

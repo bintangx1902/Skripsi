@@ -1,9 +1,8 @@
+import cv2
 import librosa
 import numpy as np
-import cv2
+import pandas as pd
 import tensorflow as tf
-from collections import Counter
-
 
 BATCH_SIZE = 64
 
@@ -43,19 +42,21 @@ def preprocess_audio(file_content, target_sr=32000, n_mels=128, fmin=80.0, fmax=
         mel_spectrogram_db = np.pad(mel_spectrogram_db, ((0, 0), (0, pad_width)), mode='constant')
     else:
         mel_spectrogram_db = mel_spectrogram_db[:, :fixed_frames]
-    
+
     spectogram = np.expand_dims(mel_spectrogram_db, axis=-1)
     return np.repeat(spectogram, 3, axis=-1)
 
 
-def preprocess_image(img_path, dsize: tuple = (128, 128), normalize=False, augment=False):
+def preprocess_image(img_path, dsize: tuple = (128, 128), normalize=False, augment=False, rescale: float = None):
     """
+    :param augment: boolean, if u need to augment the image 
+    :param normalize: boolean, if u need to normalize with (feature-mean)/std
+    :param rescale: float, the feature will be rescaled by this value
     :param img_path: path to image (full path or can be absolute path)  
     :param dsize: new data size, default is 100 x 100 px
     :return: upsampled image to 100x100 pixels
     """
-    image = cv2.imread(img_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
     image = cv2.resize(image, dsize, interpolation=cv2.INTER_LANCZOS4)
 
     if augment:
@@ -64,12 +65,13 @@ def preprocess_image(img_path, dsize: tuple = (128, 128), normalize=False, augme
         factor = 1.0 + 0.1 * (np.random.rand() - 0.5)
         image = np.clip(image * factor, 0, 255).astype(np.uint8)
 
-    image = image.astype(np.float32) / 255.0
-
     if normalize:
         mean = np.array([0.485, 0.456, 0.406])
         std = np.array([0.229, 0.224, 0.225])
         image = (image - mean) / std
+
+    if rescale is not None:
+        image = np.array(image) * rescale
     return image
 
 
@@ -80,13 +82,14 @@ def plot_model(model: tf.keras.Model, show_shapes=False, show_layer_names=False)
     :param show_layer_names: if you want to show the layer names each layer of the model
     :return: 
     """
-    tf.keras.utils.plot_model(model, show_shapes=show_shapes, show_layer_names=show_layer_names)
+    return tf.keras.utils.plot_model(model, show_shapes=show_shapes, show_layer_names=show_layer_names)
 
 
 def stratified_downsample(x_img, x_audio, y_img, y_audio):
     """
-    Downsamples the image dataset to match the total number of samples in the audio dataset
-    while preserving all classes in both datasets.
+    Downsamples the image and audio datasets while ensuring each class is preserved
+    and the number of samples matches the smallest class size in both datasets.
+    It also ensures that x_img[i] corresponds to y_img[i] and x_audio[i] corresponds to y_audio[i].
 
     Args:
         x_img (np.array): Image inputs.
@@ -100,38 +103,44 @@ def stratified_downsample(x_img, x_audio, y_img, y_audio):
     # Ensure seed for reproducibility
     np.random.seed(42)
 
-    # Count the number of samples in each class for both datasets
-    class_counts_img = Counter(y_img)
-    class_counts_audio = Counter(y_audio)
-
-    # Verify that all audio classes (8) are present
-    audio_classes = set(y_audio)
-    assert len(audio_classes) == 8, "Audio dataset must have 8 classes"
-
-    # Verify that all image classes (7) are present
-    img_classes = set(y_img)
-    assert len(img_classes) == 7, "Image dataset must have 7 classes"
+    # Determine the minimum number of samples to match the smallest dataset size
+    min_samples = min(len(x_img), len(x_audio))
 
     # Prepare lists to store downsampled indices
     selected_indices_img = []
+    selected_indices_audio = []
 
-    # Downsample image data to match audio dataset total samples
-    for cls in img_classes:
+    # Downsample image data to match the smallest class size in both datasets
+    for cls in np.unique(y_img):
         # Find indices for this class in image data
         indices_img = np.where(y_img == cls)[0]
-
-        # If this is the only way to sample while keeping all classes
+        # Shuffle and select the minimum number of samples for the class
         np.random.shuffle(indices_img)
-        selected_indices_img.extend(indices_img)
+        selected_indices_img.extend(indices_img[:min_samples])
+
+    # Downsample audio data to match the smallest class size in both datasets
+    for cls in np.unique(y_audio):
+        # Find indices for this class in audio data
+        indices_audio = np.where(y_audio == cls)[0]
+        # Shuffle and select the minimum number of samples for the class
+        np.random.shuffle(indices_audio)
+        selected_indices_audio.extend(indices_audio[:min_samples])
 
     # Convert to numpy array for indexing
     selected_indices_img = np.array(selected_indices_img)
+    selected_indices_audio = np.array(selected_indices_audio)
 
-    # Downsample image data
+    # Sort the indices so that the data and labels remain consistent
+    selected_indices_img = np.sort(selected_indices_img)
+    selected_indices_audio = np.sort(selected_indices_audio)
+
+    # Downsample both image and audio data using the selected indices
     x_img_ds = x_img[selected_indices_img]
     y_img_ds = y_img[selected_indices_img]
+    x_audio_ds = x_audio[selected_indices_audio]
+    y_audio_ds = y_audio[selected_indices_audio]
 
-    return x_img_ds, x_audio, y_img_ds, y_audio
+    return x_img_ds, x_audio_ds, y_img_ds, y_audio_ds
 
 
 def global_downsample_preserve_classes(x_img, x_audio, y_img, y_audio):
@@ -163,5 +172,36 @@ def global_downsample_preserve_classes(x_img, x_audio, y_img, y_audio):
         x_audio_ds, y_audio_ds = downsample(x_audio, y_audio, target_samples)
         x_img_ds, y_img_ds = x_img, y_img
 
+    del n_img, n_audio, target_samples
     return x_img_ds, x_audio_ds, y_img_ds, y_audio_ds
 
+
+def balance_dataframe(df, target_total):
+    labels = df['label'].unique()
+    num_labels = len(labels)
+    samples_per_label = target_total // num_labels
+
+    balanced_parts = []
+    for label in labels:
+        df_label = df[df['label'] == label]
+        sample_n = min(samples_per_label, len(df_label))
+        balanced_parts.append(df_label.sample(n=sample_n, random_state=42))
+
+    balanced_df = pd.concat(balanced_parts)
+
+    # If we're short due to label imbalance, fill the rest randomly
+    if len(balanced_df) < target_total:
+        remaining = target_total - len(balanced_df)
+        available_df = df.drop(balanced_df.index)
+        if not available_df.empty:
+            filler = available_df.sample(n=min(remaining, len(available_df)), random_state=42)
+            balanced_df = pd.concat([balanced_df, filler])
+
+    return balanced_df.reset_index(drop=True)
+
+
+def downsample_df(df1, df2):
+    target = min(len(df1), len(df2))
+    new_df1 = balance_dataframe(df1, target)
+    new_df2 = balance_dataframe(df2, target)
+    return new_df1, new_df2

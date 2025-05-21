@@ -7,7 +7,7 @@ import os
 import gc
 
 from shared.utils import *
-from shared.kaggle_path import *
+from shared.colab_path import *
 
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import LabelEncoder
@@ -62,13 +62,13 @@ train_df['label'] = le.transform(train_df['label'])
 img_test_df['label'] = le.transform(img_test_df['label'])
 #%%
 with tf.device('/GPU:0'):
-    train_df['data'] = train_df['filepath'].apply(lambda x: preprocess_image(x, (100, 100)))
-    img_test_df['data'] = img_test_df['filepath'].apply(lambda x: preprocess_image(x, (100, 100)))
+    train_df['data'] = train_df['filepath'].apply(lambda x: preprocess_image(x, (100, 100), normalize=True, augment=True))
+    img_test_df['data'] = img_test_df['filepath'].apply(lambda x: preprocess_image(x, (100, 100), normalize=True))
 #%%
-img_train_df, img_val_df = train_test_split(train_df, test_size=0.2, random_state=42, shuffle=True)
+_, img_val_df = train_test_split(train_df, test_size=0.2, random_state=42, shuffle=True)
 #%%
-x_img_train = np.stack(img_train_df['data'].values)
-y_img_train = np.array(img_train_df['label'].values)
+x_img_train = np.stack(train_df['data'].values)
+y_img_train = np.array(train_df['label'].values)
 
 x_img_val = np.stack(img_val_df['data'].values)
 y_img_val = np.array(img_val_df['label'].values)
@@ -76,7 +76,7 @@ y_img_val = np.array(img_val_df['label'].values)
 x_img_test = np.stack(img_test_df['data'].values)
 y_img_test = np.array(img_test_df['label'].values)
 
-del train_df, img_test_df, img_train_df, img_val_df
+del train_df, img_test_df, _, img_val_df
 #%%
 from collections import Counter
 
@@ -99,7 +99,8 @@ for layer in base_model.layers:
 #%%
 model = tf.keras.Sequential([
     base_model,
-    tf.keras.layers.GlobalAveragePooling2D(),
+    tf.keras.layers.Flatten(),
+    tf.keras.layers.Dropout(.5),
     tf.keras.layers.Dense(512, activation='relu'),
     tf.keras.layers.Dense(7, activation='softmax'),
 ])
@@ -130,7 +131,7 @@ checkpoint = tf.keras.callbacks.ModelCheckpoint(
 
 lr_scheduler = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss',
                                                     factor=0.2,
-                                                    min_lr=1e-4,
+                                                    min_lr=1e-5,
                                                     patience=3,
                                                     mode='min'
                                                     )
@@ -140,7 +141,7 @@ history = model.fit(
     y_img_train,
     validation_data=(x_img_val, y_img_val),
     callbacks=[checkpoint, lr_scheduler],
-    epochs=50,
+    epochs=100,
     verbose=2,
     batch_size=BATCH_SIZE,
     steps_per_epoch=len(x_img_train) // BATCH_SIZE,
@@ -192,5 +193,5 @@ print(classification_report(predictions, y_img_test))
 #%%
 model.save('model_img_sc4t4.h5')
 #%%
-!zip -q -r run_kaggle.zip /kaggle/working/*.png /kaggle/working/*.h5
+# !zip -q -r run_kaggle.zip /kaggle/working/*.png /kaggle/working/*.h5
 #%%

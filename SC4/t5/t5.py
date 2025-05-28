@@ -131,14 +131,12 @@ for layer in base.layers:
 input_image = tf.keras.Input(shape=(100, 100, 3), name='input_image')
 
 left = base(input_image)
-left = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same', strides=1)(left)
 left = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same', strides=1)(left)
 left = tf.keras.layers.MaxPooling2D((2, 2), strides=(2, 2))(left)
 left = tf.keras.layers.BatchNormalization(momentum=0.1, epsilon=1e-3)(left)
 left = tf.keras.layers.Dropout(0.3)(left)
 left = tf.keras.layers.Flatten()(left)
-left = tf.keras.layers.BatchNormalization()(left)
-left = tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(left)
+left = tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01))(left)
 out1 = tf.keras.layers.Dense(7, activation='softmax', name='image_class')(left)
 
 model = tf.keras.models.Model(input_image, out1)

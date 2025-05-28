@@ -1,3 +1,5 @@
+import random
+
 import cv2
 import librosa
 import numpy as np
@@ -47,31 +49,105 @@ def preprocess_audio(file_content, target_sr=32000, n_mels=128, fmin=80.0, fmax=
     return np.repeat(spectogram, 3, axis=-1)
 
 
-def preprocess_image(img_path, dsize: tuple = (128, 128), normalize=False, augment=False, rescale: float = None):
+def preprocess_image(img_path, dsize: tuple = (128, 128), normalize=False, augment=False, 
+                     rescale: float = None, preprocess_function=None):
     """
-    :param augment: boolean, if u need to augment the image 
-    :param normalize: boolean, if u need to normalize with (feature-mean)/std
-    :param rescale: float, the feature will be rescaled by this value
-    :param img_path: path to image (full path or can be absolute path)  
-    :param dsize: new data size, default is 100 x 100 px
-    :return: upsampled image to 100x100 pixels
+    Preprocesses an image with optional normalization, rescaling, augmentation, or custom preprocessing.
+
+    Args:
+        img_path (str): Path to the image (relative or absolute).
+        dsize (tuple): Target size for resizing (width, height), default is (128, 128).
+        normalize (bool): If True, normalize using ImageNet mean and std.
+        augment (bool): If True, apply one random augmentation (flip, rotate, or zoom).
+        rescale (float, optional): If provided, rescale image pixel values by this factor.
+        preprocess_function (callable, optional): Custom preprocessing function, e.g., tf.keras.applications.vgg19.preprocess_input.
+
+    Returns:
+        np.ndarray or tf.Tensor: Processed image as a NumPy array or TensorFlow tensor (if preprocess_function is used).
+
+    Raises:
+        FileNotFoundError: If the image path is invalid.
+        ValueError: If input parameters are invalid (e.g., negative dsize, conflicting options).
     """
+    if preprocess_function is not None and not callable(preprocess_function):
+        raise ValueError("preprocess_function must be a callable function.")
+    
     image = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
     image = cv2.resize(image, dsize, interpolation=cv2.INTER_LANCZOS4)
 
-    if augment:
-        if np.random.rand() < 0.5:
-            image = cv2.flip(image, 1)
-        factor = 1.0 + 0.1 * (np.random.rand() - 0.5)
-        image = np.clip(image * factor, 0, 255).astype(np.uint8)
-
-    if normalize:
+    if normalize and rescale is None:
         mean = np.array([0.485, 0.456, 0.406])
         std = np.array([0.229, 0.224, 0.225])
         image = (image - mean) / std
 
-    if rescale is not None:
+    if rescale is not None and not normalize:
         image = np.array(image) * rescale
+
+    if augment:
+        # Choose one augmentation randomly
+        augmentations = ['flip_horizontal', 'flip_vertical', 'rotate',]
+        chosen_aug = random.choice(augmentations)
+
+        if chosen_aug == 'flip_horizontal':
+            image = cv2.flip(image, 1)
+        elif chosen_aug == 'flip_vertical':
+            image = cv2.flip(image, 0)
+        elif chosen_aug == 'rotate':
+            # Random rotation between -30 and 30 degrees
+            angle = random.uniform(-30, 30)
+            h, w = image.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            image = cv2.warpAffine(image, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        elif chosen_aug == 'zoom':
+            # Random zoom between 0.8x and 1.2x
+            zoom_factor = random.uniform(0.8, 1.2)
+            h, w = image.shape[:2]
+            new_h, new_w = int(h * zoom_factor), int(w * zoom_factor)
+            if zoom_factor > 1.0:
+                # Zoom in: crop the center
+                resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                start_x = (new_w - w) // 2
+                start_y = (new_h - h) // 2
+                image = resized[start_y:start_y + h, start_x:start_x + w]
+            else:
+                # Zoom out: pad with replicated borders
+                resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                pad_x = (w - new_w) // 2
+                pad_y = (h - new_h) // 2
+                image = cv2.copyMakeBorder(resized, pad_y, pad_y, pad_x, pad_x,
+                                           cv2.BORDER_REPLICATE)
+
+    if preprocess_function is not None:
+        return np.array(preprocess_function(image))
+    return image
+
+
+def preprocess_image_tf(img_path, dsize: tuple = (128, 128), decode=False, cv=False, normalize=False, augment=False,
+                        rescale: float = None):
+    if decode:
+        image = tf.io.read_file(img_path)
+        image = tf.io.decode_image(image, expand_animations=False, dtype=tf.float32, channels=3)
+    else:
+        image = tf.keras.utils.load_img(img_path)
+        image = tf.keras.preprocessing.image.img_to_array(image)
+        if image.shape[-1] == 1:  # grayscale
+            image = tf.image.grayscale_to_rgb(image)
+        image = tf.convert_to_tensor(image, dtype=tf.float32)  # Ensure it's a tensor
+
+    if cv:
+        image_np = image.numpy() if isinstance(image, tf.Tensor) else image
+        image_np = cv2.resize(image_np, dsize, interpolation=cv2.INTER_LANCZOS4)
+        image = tf.convert_to_tensor(image_np, dtype=tf.float32)
+    else:
+        image = tf.image.resize(image, dsize, method='lanczos5')
+
+    if normalize:
+        image = image / 255.0
+
+    if rescale is not None and not normalize:
+        image = image * rescale
+
     return image
 
 
@@ -143,37 +219,11 @@ def stratified_downsample(x_img, x_audio, y_img, y_audio):
     return x_img_ds, x_audio_ds, y_img_ds, y_audio_ds
 
 
-def global_downsample_preserve_classes(x_img, x_audio, y_img, y_audio):
-    """
-    Randomly downsample the larger dataset to match the smaller one,
-    ensuring that all original classes remain present.
-
-    Returns:
-        x_img_ds, x_audio_ds, y_img_ds, y_audio_ds
-    """
-    # Tentukan dataset yang lebih kecil
-    n_img = len(y_img)
-    n_audio = len(y_audio)
-    target_samples = min(n_img, n_audio)
-
-    def downsample(x, y, target_size):
-        # Ulangi hingga mendapatkan subset yang masih mencakup semua kelas
-        classes = set(y)
-        while True:
-            indices = np.random.choice(len(y), size=target_size, replace=False)
-            y_subset = y[indices]
-            if set(y_subset) == classes:
-                return x[indices], y[indices]
-
-    if n_img > n_audio:
-        x_img_ds, y_img_ds = downsample(x_img, y_img, target_samples)
-        x_audio_ds, y_audio_ds = x_audio, y_audio
-    else:
-        x_audio_ds, y_audio_ds = downsample(x_audio, y_audio, target_samples)
-        x_img_ds, y_img_ds = x_img, y_img
-
-    del n_img, n_audio, target_samples
-    return x_img_ds, x_audio_ds, y_img_ds, y_audio_ds
+def downsample_df(df1, df2):
+    target = min(len(df1), len(df2))
+    new_df1 = balance_dataframe(df1, target)
+    new_df2 = balance_dataframe(df2, target)
+    return new_df1, new_df2
 
 
 def balance_dataframe(df, target_total):
@@ -198,10 +248,3 @@ def balance_dataframe(df, target_total):
             balanced_df = pd.concat([balanced_df, filler])
 
     return balanced_df.reset_index(drop=True)
-
-
-def downsample_df(df1, df2):
-    target = min(len(df1), len(df2))
-    new_df1 = balance_dataframe(df1, target)
-    new_df2 = balance_dataframe(df2, target)
-    return new_df1, new_df2
